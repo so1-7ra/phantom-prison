@@ -1,0 +1,20 @@
+; Engine configuration file.
+; Godot 4.3 以降で開くこと。
+
+config_version=5
+
+[application]
+
+config/name="Phantom Prison"
+config/description="幽霊が囚われた刑務所から霊瓶を運び出す、終わりのない回収ホラー"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+
+[rendering]
+
+anti_aliasing/quality/msaa_3d=1
