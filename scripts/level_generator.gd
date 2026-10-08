@@ -9,26 +9,60 @@ const WALL_THICKNESS := 0.4
 const DOOR_WIDTH := 2.4
 const EXTRA_OPENING_CHANCE := 0.15
 const LIGHT_CHANCE := 0.35
+const FLICKER_CHANCE := 0.3
 const GHOST_MIN_DISTANCE := 4
 const DIRECTIONS: Array[Vector2i] = [Vector2i.RIGHT, Vector2i.LEFT, Vector2i.DOWN, Vector2i.UP]
+const WORLD_SHADER := preload("res://shaders/ps1_world.gdshader")
+
+# テクスチャ生成は重いので、全フロアで使い回す
+static var _wall_material: ShaderMaterial
+static var _floor_material: ShaderMaterial
+static var _lamp_material: StandardMaterial3D
 
 var width: int
 var height: int
 
 var _rng: RandomNumberGenerator
 var _open_edges := {}
-var _wall_material := StandardMaterial3D.new()
-var _floor_material := StandardMaterial3D.new()
 
 
 func _init(rng: RandomNumberGenerator, grid_width := 5, grid_height := 5) -> void:
 	_rng = rng
 	width = grid_width
 	height = grid_height
-	_wall_material.albedo_color = Color(0.32, 0.34, 0.33)
-	_wall_material.roughness = 0.95
-	_floor_material.albedo_color = Color(0.18, 0.17, 0.16)
-	_floor_material.roughness = 1.0
+	if _wall_material == null:
+		_wall_material = _make_material(
+			_make_noise_texture(FastNoiseLite.TYPE_CELLULAR, 0.09, Color(0.22, 0.24, 0.22), Color(0.48, 0.5, 0.46)), 0.5)
+		_floor_material = _make_material(
+			_make_noise_texture(FastNoiseLite.TYPE_SIMPLEX, 0.12, Color(0.1, 0.09, 0.08), Color(0.3, 0.27, 0.24)), 0.6)
+		_lamp_material = StandardMaterial3D.new()
+		_lamp_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_lamp_material.albedo_color = Color(1.0, 0.9, 0.7)
+
+
+static func _make_noise_texture(type: FastNoiseLite.NoiseType, frequency: float, dark: Color, light: Color) -> NoiseTexture2D:
+	var noise := FastNoiseLite.new()
+	noise.noise_type = type
+	noise.frequency = frequency
+	noise.fractal_octaves = 3
+	var gradient := Gradient.new()
+	gradient.set_color(0, dark)
+	gradient.set_color(1, light)
+	var texture := NoiseTexture2D.new()
+	texture.width = 64
+	texture.height = 64
+	texture.seamless = true
+	texture.noise = noise
+	texture.color_ramp = gradient
+	return texture
+
+
+static func _make_material(texture: Texture2D, texture_scale: float) -> ShaderMaterial:
+	var material := ShaderMaterial.new()
+	material.shader = WORLD_SHADER
+	material.set_shader_parameter("albedo_texture", texture)
+	material.set_shader_parameter("texture_scale", texture_scale)
+	return material
 
 
 ## 親ノードの下にフロアを組み立て、出現位置などの情報を返す。
@@ -153,12 +187,19 @@ func _build_lights(parent: Node3D) -> void:
 			var cell := Vector2i(x, y)
 			if cell == Vector2i.ZERO or _rng.randf() > LIGHT_CHANCE:
 				continue
-			var light := OmniLight3D.new()
+			var light: OmniLight3D = FlickerLight.new() if _rng.randf() < FLICKER_CHANCE else OmniLight3D.new()
 			light.light_color = Color(1.0, 0.78, 0.55)
 			light.light_energy = 0.7
 			light.omni_range = 6.0
 			light.position = cell_center(cell) + Vector3(0, WALL_HEIGHT - 0.4, 0)
 			parent.add_child(light)
+			var lamp := BoxMesh.new()
+			lamp.size = Vector3(1.2, 0.08, 0.2)
+			lamp.material = _lamp_material
+			var lamp_instance := MeshInstance3D.new()
+			lamp_instance.mesh = lamp
+			lamp_instance.position = cell_center(cell) + Vector3(0, WALL_HEIGHT - 0.05, 0)
+			parent.add_child(lamp_instance)
 
 
 func _jar_spots() -> Array[Vector3]:

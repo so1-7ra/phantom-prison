@@ -1,42 +1,77 @@
-extends Node3D
+extends Node
 ## ゲーム全体の進行。夜ごとに刑務所を生成し、ノルマを達成すれば次の夜へ、
 ## 未達成か取り憑かれたら収監（ゲームオーバー）になる。全クリはなく、記録は「到達した夜」。
+##
+## 3D の世界は低解像度の SubViewport に描いて拡大し、PS1 風の粗い画面にしている。
+## HUD とメニューは通常の解像度のまま重ねる。
 
-enum State { PLAYING, NIGHT_CLEAR, GAME_OVER }
+enum State { TITLE, PLAYING, NIGHT_CLEAR, GAME_OVER }
 
-const NIGHT_DURATION := 180.0
-const BASE_QUOTA := 300
-const QUOTA_GROWTH := 1.35
-const BASE_JAR_COUNT := 6
-const JARS_PER_NIGHT := 2
-const RARE_CHANCE := 0.15
-const VALUE_GROWTH_PER_NIGHT := 0.15
-const MAX_WANDERERS := 4
 const CLEAR_DELAY := 3.0
-const SAVE_PATH := "user://save.cfg"
+const TITLE_CAMERA_SPEED := 0.12
+const ESCAPE_EMERGE_TIME := 1.5
+const POST_SHADER := preload("res://shaders/ps1_post.gdshader")
 
+var save_path := "user://save.cfg"
 var night := 1
-var quota := BASE_QUOTA
+var quota := 0
 var earned := 0
-var time_left := NIGHT_DURATION
+var time_left := 0.0
 var best_night := 0
-var state := State.PLAYING
+var state := State.TITLE
 
+var balance: GameBalance = GameBalance.current()
+var world := Node3D.new()
 var level: Node3D
 var player: Player
 var zone: ExtractionZone
 var hud := Hud.new()
+var menu := Menu.new()
 
+var _container := SubViewportContainer.new()
+var _viewport := SubViewport.new()
+var _post_material := ShaderMaterial.new()
+var _title_camera: Camera3D
+var _ambient := AudioStreamPlayer.new()
 var _rng := RandomNumberGenerator.new()
 
 
 func _ready() -> void:
 	InputSetup.register()
-	_setup_environment()
-	add_child(hud)
-	_load_best()
 	_rng.randomize()
-	start_night()
+	_load_best()
+	_setup_viewport()
+	_setup_environment()
+
+	_ambient.stream = Sfx.get_stream(&"ambient")
+	_ambient.volume_db = -8.0
+	add_child(_ambient)
+	_ambient.play()
+
+	add_child(hud)
+	menu.process_mode = Node.PROCESS_MODE_ALWAYS
+	add_child(menu)
+	menu.start_requested.connect(start_game)
+	menu.retry_requested.connect(start_game)
+	menu.resume_requested.connect(set_paused.bind(false))
+	menu.title_requested.connect(show_title)
+	menu.quit_requested.connect(get_tree().quit)
+
+	Config.settings_changed.connect(_apply_settings)
+	_apply_settings()
+	show_title()
+
+
+func _setup_viewport() -> void:
+	_container.stretch = true
+	_container.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_post_material.shader = POST_SHADER
+	_container.material = _post_material
+	_viewport.audio_listener_enable_3d = true
+	add_child(_container)
+	_container.add_child(_viewport)
+	_viewport.add_child(world)
 
 
 func _setup_environment() -> void:
@@ -48,61 +83,97 @@ func _setup_environment() -> void:
 	env.ambient_light_energy = 0.15
 	env.fog_enabled = true
 	env.fog_light_color = Color(0.05, 0.06, 0.08)
-	env.fog_density = 0.03
+	env.fog_density = 0.04
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
-	add_child(world_env)
+	world.add_child(world_env)
+
+
+func _apply_settings() -> void:
+	_container.stretch_shrink = clampi(Config.pixel_size, 1, 4)
+	_post_material.set_shader_parameter("pixel_size", float(_container.stretch_shrink))
+
+
+## タイトル画面。背景では刑務所の中をカメラがゆっくり見回す。
+func show_title() -> void:
+	set_paused(false)
+	state = State.TITLE
+	hud.visible = false
+	_build_level()
+	_title_camera = Camera3D.new()
+	_title_camera.position = Vector3(0, 1.7, 0)
+	level.add_child(_title_camera)
+	_title_camera.current = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	menu.show_title(best_night)
+
+
+func start_game() -> void:
+	set_paused(false)
+	night = 1
+	quota = balance.base_quota
+	start_night()
 
 
 func start_night() -> void:
-	if level:
-		remove_child(level)
-		level.queue_free()
-	var level_rng := RandomNumberGenerator.new()
-	level_rng.seed = _rng.randi()
-
-	level = Node3D.new()
-	level.name = "Level"
-	add_child(level)
-	var layout := LevelGenerator.new(level_rng).build(level)
+	var layout := _build_level()
 	var start: Vector3 = layout["start"]
-
-	zone = ExtractionZone.new()
-	zone.position = start
-	zone.jar_sold.connect(_on_jar_sold)
-	level.add_child(zone)
 
 	player = Player.new()
 	player.position = start + Vector3(0, 0.1, 0)
 	player.damaged.connect(hud.flash_damage)
 	player.died.connect(_on_player_died)
 	level.add_child(player)
-
-	_spawn_jars(level_rng, layout["jar_spots"])
 	_spawn_wanderers(layout["ghost_spots"])
 
 	earned = 0
-	time_left = NIGHT_DURATION
+	time_left = balance.night_duration
 	state = State.PLAYING
+	hud.visible = true
+	menu.hide_all()
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	hud.show_message("夜 %d\nノルマ ¥%d" % [night, quota], 3.0)
 
 
+## フロア・搬出口・霊瓶を作り直す。プレイヤーと幽霊は呼び出し側で置く。
+func _build_level() -> Dictionary:
+	if level:
+		world.remove_child(level)
+		level.queue_free()
+	player = null
+	_title_camera = null
+
+	var level_rng := RandomNumberGenerator.new()
+	level_rng.seed = _rng.randi()
+	level = Node3D.new()
+	level.name = "Level"
+	world.add_child(level)
+	var layout := LevelGenerator.new(level_rng).build(level)
+
+	zone = ExtractionZone.new()
+	zone.position = layout["start"]
+	zone.jar_sold.connect(_on_jar_sold)
+	level.add_child(zone)
+	_spawn_jars(level_rng, layout["jar_spots"])
+	return layout
+
+
 func _spawn_jars(rng: RandomNumberGenerator, spots: Array[Vector3]) -> void:
-	var count := mini(BASE_JAR_COUNT + JARS_PER_NIGHT * (night - 1), spots.size())
-	var value_scale := 1.0 + VALUE_GROWTH_PER_NIGHT * (night - 1)
+	var count := mini(balance.base_jar_count + balance.jars_per_night * (night - 1), spots.size())
+	var value_scale := 1.0 + balance.value_growth_per_night * (night - 1)
 	for i in count:
-		var rare := rng.randf() < RARE_CHANCE
-		var base_value := rng.randi_range(200, 320) if rare else rng.randi_range(60, 120)
+		var rare := rng.randf() < balance.rare_chance
+		var value_range := balance.rare_value_range if rare else balance.common_value_range
 		var jar := GhostJar.new()
-		jar.setup(int(base_value * value_scale), rare)
+		jar.setup(int(rng.randi_range(value_range.x, value_range.y) * value_scale), rare)
 		jar.position = spots[i] + Vector3(0, 0.31, 0)
 		jar.escaped.connect(_on_jar_escaped)
 		level.add_child(jar)
 
 
-## 2夜目以降は、最初から刑務所をさまよう幽霊が出る。
+## 2 夜目以降は、最初から刑務所をさまよう幽霊が出る。
 func _spawn_wanderers(spots: Array[Vector3]) -> void:
-	for i in mini(mini(night - 1, MAX_WANDERERS), spots.size()):
+	for i in mini(mini(night - 1, balance.max_wanderers), spots.size()):
 		var ghost := Ghost.new()
 		ghost.position = spots[i]
 		ghost.target = player
@@ -110,6 +181,10 @@ func _spawn_wanderers(spots: Array[Vector3]) -> void:
 
 
 func _process(delta: float) -> void:
+	if state == State.TITLE:
+		if is_instance_valid(_title_camera):
+			_title_camera.rotate_y(delta * TITLE_CAMERA_SPEED)
+		return
 	if state == State.PLAYING:
 		time_left = maxf(time_left - delta, 0.0)
 		if time_left <= 0.0:
@@ -119,11 +194,8 @@ func _process(delta: float) -> void:
 
 
 func _current_hint() -> String:
-	match state:
-		State.GAME_OVER:
-			return "[R] もう一度"
-		State.NIGHT_CLEAR:
-			return ""
+	if state != State.PLAYING:
+		return ""
 	if player.held and is_instance_valid(player.held):
 		return "[E] 離す   [右クリック] 投げる   封印 %d%%" % int(player.held.seal)
 	var jar := player.get_aimed_jar()
@@ -137,32 +209,42 @@ func _current_hint() -> String:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("end_night") and state == State.PLAYING and zone.player_inside and earned >= quota:
+	if event.is_action_pressed("pause") and (state == State.PLAYING or state == State.NIGHT_CLEAR):
+		set_paused(true)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("end_night") and state == State.PLAYING and zone.player_inside and earned >= quota:
 		end_night()
 	elif event.is_action_pressed("restart") and state == State.GAME_OVER:
-		restart()
+		start_game()
+
+
+func set_paused(paused: bool) -> void:
+	get_tree().paused = paused
+	hud.visible = not paused and state != State.TITLE
+	if paused:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		menu.show_pause()
+	elif state == State.PLAYING or state == State.NIGHT_CLEAR:
+		menu.hide_all()
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func end_night() -> void:
 	if state != State.PLAYING:
 		return
 	if earned < quota:
-		_game_over("ノルマ未達成……あなたは収監された")
+		_game_over("ノルマ未達成……")
 		return
 	state = State.NIGHT_CLEAR
 	player.controls_enabled = false
+	Sfx.play(self, &"night_clear")
 	hud.show_message("夜 %d 突破！\n収益 ¥%d / ノルマ ¥%d" % [night, earned, quota], CLEAR_DELAY)
-	await get_tree().create_timer(CLEAR_DELAY).timeout
+	# 一時停止中はタイマーも止める
+	await get_tree().create_timer(CLEAR_DELAY, false).timeout
 	if state != State.NIGHT_CLEAR:
 		return
 	night += 1
-	quota = int(round(quota * QUOTA_GROWTH / 10.0)) * 10
-	start_night()
-
-
-func restart() -> void:
-	night = 1
-	quota = BASE_QUOTA
+	quota = int(round(quota * balance.quota_growth / 10.0)) * 10
 	start_night()
 
 
@@ -172,13 +254,17 @@ func _game_over(reason: String) -> void:
 	if night > best_night:
 		best_night = night
 		_save_best()
-	hud.show_message("%s\n到達：夜 %d（最高記録：夜 %d）" % [reason, night, best_night], 0.0)
+	Sfx.play(self, &"game_over")
+	hud.show_message("", 0.0)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	menu.show_game_over("%s\n到達：夜 %d（最高記録：夜 %d）" % [reason, night, best_night])
 
 
 func _on_jar_sold(amount: int) -> void:
 	if state != State.PLAYING:
 		return
 	earned += amount
+	Sfx.play(self, &"sell")
 	hud.show_message("+¥%d" % amount, 1.5)
 
 
@@ -187,9 +273,12 @@ func _on_jar_escaped(jar: GhostJar) -> void:
 	ghost.position = jar.global_position + Vector3(0, 0.5, 0)
 	ghost.target = player
 	ghost.hostile = true
-	ghost.chase_speed = 3.2
+	ghost.chase_speed = balance.escaped_chase_speed
+	ghost.emerge_time = ESCAPE_EMERGE_TIME
 	level.add_child(ghost)
-	hud.show_message("封印が破れた！", 1.5)
+	Sfx.play_at(level, &"escape", jar.global_position)
+	if state == State.PLAYING:
+		hud.show_message("封印が破れた！", 1.5)
 
 
 func _on_player_died() -> void:
@@ -199,11 +288,11 @@ func _on_player_died() -> void:
 
 func _load_best() -> void:
 	var config := ConfigFile.new()
-	if config.load(SAVE_PATH) == OK:
+	if config.load(save_path) == OK:
 		best_night = config.get_value("record", "best_night", 0)
 
 
 func _save_best() -> void:
 	var config := ConfigFile.new()
 	config.set_value("record", "best_night", best_night)
-	config.save(SAVE_PATH)
+	config.save(save_path)

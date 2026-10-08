@@ -17,7 +17,7 @@ func _ready() -> void:
 	_damage_overlay.color = Color(0.6, 0.0, 0.0, 0.0)
 	add_child(_damage_overlay)
 
-	_setup_label(_stats, 20)
+	_setup_label(_stats, 32)
 	_stats.position = Vector2(16, 12)
 
 	_setup_label(_crosshair, 24)
@@ -26,13 +26,13 @@ func _ready() -> void:
 	_crosshair.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_crosshair.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 
-	_setup_label(_hint, 20)
+	_setup_label(_hint, 32)
 	_hint.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_hint.offset_bottom = -64
 	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_hint.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 
-	_setup_label(_message, 40)
+	_setup_label(_message, 48)
 	_message.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_message.offset_top = -160
 	_message.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

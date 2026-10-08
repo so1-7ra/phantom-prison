@@ -5,12 +5,9 @@ extends CharacterBody3D
 signal damaged(amount: float)
 signal died
 
-const WALK_SPEED := 4.0
-const SPRINT_SPEED := 7.0
-const CARRY_SPEED_FACTOR := 0.75
 const ACCELERATION := 40.0
 const JUMP_VELOCITY := 4.5
-const MOUSE_SENSITIVITY := 0.0025
+const BASE_MOUSE_SENSITIVITY := 0.0025
 const EYE_HEIGHT := 1.6
 const GRAB_DISTANCE := 3.0
 const HOLD_DISTANCE := 1.6
@@ -18,9 +15,10 @@ const HOLD_STIFFNESS := 12.0
 const MAX_HOLD_SPEED := 10.0
 const DROP_DISTANCE := 2.5
 const THROW_IMPULSE := 8.0
-const MAX_HP := 100.0
+const STEP_LENGTH := 2.2
 
-var hp := MAX_HP
+var balance: GameBalance = GameBalance.current()
+var hp := balance.max_hp
 var controls_enabled := true
 var held: GhostJar = null
 
@@ -28,6 +26,7 @@ var camera := Camera3D.new()
 var _ray := RayCast3D.new()
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var _dead := false
+var _step_distance := 0.0
 
 
 func _ready() -> void:
@@ -55,18 +54,16 @@ func _ready() -> void:
 	flashlight.position = Vector3(0.2, -0.2, 0)
 	camera.add_child(flashlight)
 
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
-		camera.rotation.x = clampf(camera.rotation.x - event.relative.y * MOUSE_SENSITIVITY, -1.4, 1.4)
-	elif event is InputEventMouseButton and event.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		# 画面を粗くしても感度が変わらないよう、拡大前の移動量（screen_relative）を使う
+		var sensitivity := BASE_MOUSE_SENSITIVITY * Config.mouse_sensitivity
+		rotate_y(-event.screen_relative.x * sensitivity)
+		camera.rotation.x = clampf(camera.rotation.x - event.screen_relative.y * sensitivity, -1.4, 1.4)
+	elif event is InputEventMouseButton and event.pressed and controls_enabled and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ui_cancel"):
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _physics_process(delta: float) -> void:
@@ -79,17 +76,28 @@ func _physics_process(delta: float) -> void:
 		if Input.is_action_just_pressed("jump") and is_on_floor():
 			velocity.y = JUMP_VELOCITY
 	var direction := (transform.basis * Vector3(input.x, 0, input.y)).normalized()
-	var speed := SPRINT_SPEED if Input.is_action_pressed("sprint") else WALK_SPEED
+	var sprinting := Input.is_action_pressed("sprint")
+	var speed := balance.sprint_speed if sprinting else balance.walk_speed
 	if held:
-		speed *= CARRY_SPEED_FACTOR
+		speed *= balance.carry_speed_factor
 	# 加速を緩やかにして、急発進で瓶が揺れすぎないようにする
 	velocity.x = move_toward(velocity.x, direction.x * speed, ACCELERATION * delta)
 	velocity.z = move_toward(velocity.z, direction.z * speed, ACCELERATION * delta)
 	move_and_slide()
+	_update_footsteps(delta, sprinting)
 
 	_update_held()
 	if controls_enabled:
 		_handle_interaction()
+
+
+func _update_footsteps(delta: float, sprinting: bool) -> void:
+	if not is_on_floor():
+		return
+	_step_distance += Vector2(velocity.x, velocity.z).length() * delta
+	if _step_distance >= STEP_LENGTH:
+		_step_distance = 0.0
+		Sfx.play(self, &"footstep", -9.0 if sprinting else -14.0, randf_range(0.85, 1.1))
 
 
 func _handle_interaction() -> void:

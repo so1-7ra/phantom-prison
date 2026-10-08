@@ -5,13 +5,12 @@ extends RigidBody3D
 
 signal escaped(jar: GhostJar)
 
-## 1 物理フレームでこれ以上速度が変わると封印にダメージが入る (m/s)
-const DV_THRESHOLD := 1.0
-const DV_DAMAGE := 8.0
 const RATTLE_SEAL := 50.0
 const CALM_COLOR := Color(0.45, 0.85, 1.0)
 const RARE_COLOR := Color(0.8, 0.5, 1.0)
 const ANGRY_COLOR := Color(1.0, 0.15, 0.1)
+## これ以上の速度変化でガラスの音が鳴る (m/s)
+const CLINK_DV := 2.0
 
 var value := 100
 var is_rare := false
@@ -26,13 +25,16 @@ var _time := 0.0
 var _rng := RandomNumberGenerator.new()
 var _core_material := StandardMaterial3D.new()
 var _light := OmniLight3D.new()
+var _hum := AudioStreamPlayer3D.new()
+var _clink_cooldown := 0.0
+var _balance: GameBalance = GameBalance.current()
 
 
 ## add_child() の前に呼ぶ。
 func setup(jar_value: int, rare: bool) -> void:
 	value = jar_value
 	is_rare = rare
-	fragility = 1.6 if rare else 1.0
+	fragility = GameBalance.current().rare_fragility if rare else 1.0
 
 
 func _ready() -> void:
@@ -75,6 +77,12 @@ func _ready() -> void:
 	_light.omni_range = 2.5
 	_light.light_energy = 0.8
 	add_child(_light)
+
+	_hum.stream = Sfx.get_stream(&"jar_hum")
+	_hum.max_distance = 10.0
+	_hum.unit_size = 1.5
+	add_child(_hum)
+	_hum.play(_rng.randf() * _hum.stream.get_length())
 	_update_visuals()
 
 
@@ -89,10 +97,15 @@ func _physics_process(delta: float) -> void:
 	_time += delta
 	var dv := (linear_velocity - _prev_velocity).length()
 	_prev_velocity = linear_velocity
+	_clink_cooldown -= delta
 	if _settle_frames > 0:
 		_settle_frames -= 1
-	elif dv > DV_THRESHOLD:
-		damage((dv - DV_THRESHOLD) * DV_DAMAGE * fragility)
+	else:
+		if dv > _balance.seal_dv_threshold:
+			damage((dv - _balance.seal_dv_threshold) * _balance.seal_dv_damage * fragility)
+		if dv > CLINK_DV and _clink_cooldown <= 0.0 and is_inside_tree():
+			_clink_cooldown = 0.1
+			Sfx.play_at(get_parent(), &"clink", global_position, linear_to_db(clampf(dv / 8.0, 0.1, 1.0)), _rng.randf_range(0.9, 1.2))
 
 	# 封印が弱ると中の幽霊が暴れて瓶がガタつく
 	if seal < RATTLE_SEAL and not held and _rng.randf() < delta * 0.5:
@@ -131,3 +144,5 @@ func _update_visuals() -> void:
 	_light.light_color = color
 	var flicker := 1.0 - anger * 0.6 * absf(sin(_time * (4.0 + anger * 20.0)))
 	_light.light_energy = 0.8 * flicker
+	_hum.volume_db = lerpf(-28.0, -4.0, anger)
+	_hum.pitch_scale = 1.0 + anger * 0.6

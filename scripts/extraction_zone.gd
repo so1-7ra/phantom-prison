@@ -38,9 +38,10 @@ func _ready() -> void:
 
 	var label := Label3D.new()
 	label.text = "搬出口"
+	label.font = preload("res://fonts/DotGothic16-Regular.ttf")
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.modulate = Color(0.5, 1.0, 0.7)
-	label.font_size = 64
+	label.font_size = 96
 	label.position.y = 2.8
 	add_child(label)
 

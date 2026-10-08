@@ -15,6 +15,7 @@ static func register() -> void:
 	_add_mouse("throw", MOUSE_BUTTON_RIGHT)
 	_add_key("end_night", KEY_F)
 	_add_key("restart", KEY_R)
+	_add_key("pause", KEY_ESCAPE)
 
 
 static func _ensure_action(action: StringName) -> void:
